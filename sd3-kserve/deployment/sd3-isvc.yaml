@@ -1,0 +1,19 @@
+apiVersion: "serving.kserve.io/v1beta1"
+kind: "InferenceService"
+metadata:
+  name: "torchserve-sd3"
+spec:
+  predictor:
+    serviceAccountName: s3-read-only
+    pytorch:
+      protocolVersion: v1
+      storageUri: "s3://sd3-kserve/sd3/"
+      image: pytorch/torchserve-kfs:0.12.0-gpu
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16Gi
+          nvidia.com/gpu: "1"
+      env:
+        - name: TS_DISABLE_TOKEN_AUTHORIZATION
+          value: "true"

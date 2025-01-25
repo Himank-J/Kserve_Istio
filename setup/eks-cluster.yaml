@@ -1,0 +1,37 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: eks-cluster-kserve
+  region: ap-south-1
+  version: "1.30"
+
+managedNodeGroups:
+  # - name: ng-spot-1
+  #   instanceType: t3a.medium
+  #   desiredCapacity: 5
+  #   spot: true
+  #   labels:
+  #     role: spot
+  #   propagateASGTags: true
+  #   iam:
+  #     withAddonPolicies:
+  #       autoScaler: true
+  #       externalDNS: true
+  #       certManager: true
+  #       awsLoadBalancerController: true
+  #       ebs: true
+  - name: ng-gpu-spot-1
+    instanceType: g6.2xlarge
+    desiredCapacity: 1
+    spot: true
+    labels:
+      role: spot
+    propagateASGTags: true
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        externalDNS: true
+        certManager: true
+        awsLoadBalancerController: true
+        ebs: true
