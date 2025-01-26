@@ -221,18 +221,23 @@ python test_inference.py
 ## SD3 Output
 
 Inference 1
+
 <img width="300" alt="image" src="sd3-kserve/output_images/output_1.jpg" />
 
 Inference 2
+
 <img width="300" alt="image" src="sd3-kserve/output_images/output_2.jpg" />
 
 Inference 3
+
 <img width="300" alt="image" src="sd3-kserve/output_images/output_3.jpg" />
 
 Inference 4
+
 <img width="300" alt="image" src="sd3-kserve/output_images/output_4.jpg" />
 
 Inference 5
+
 <img width="300" alt="image" src="sd3-kserve/output_images/output_5.jpg" />
 
 ---
