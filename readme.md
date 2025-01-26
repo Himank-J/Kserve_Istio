@@ -68,98 +68,173 @@ This project involves the deployment of a text-to-image generation backend power
 
 ## Integrate SD3 with Torchscript
 
-aws configure
+**Step - 1**
 
-sudo snap install kubectl --classic
+First we need to download the required model from hugginface: [download_model.py](sd3-kserve/download_model.py)
 
-eksctl create cluster -f eks-cluster.yaml
+```python
+python download_model.py
+```
+This will download model weights and store in `sd3-model` directory
 
-eksctl utils associate-iam-oidc-provider --region ap-south-1 --cluster eks-cluster-kserve --approve
+**Step - 2**
+Now we need to create `.mar` file using model weights. Before we do that we need to create a handler file - [sd3_handler](sd3-kserve/sd3_handler.py)
 
-helm repo add istio https://istio-release.storage.googleapis.com/charts
+```bash
+The handler does the following:
+1. Initialise - Pull model weights from S3 and load model
+2. Pre-process input to be accpetable for inference
+3. Model inference
+4. Post-process output before returning output
+```
+**Step - 3**
+Now that we have the handler ready, we can go ahead and create `.mar` file - [create_mar.sh](sd3-kserve/bash_scripts/create_mar.sh)
 
-kubectl create namespace istio-system
+```bash
+#!/bin/bash
 
-helm install istio-base istio/base \
-  --version 1.20.2 \
-  --namespace istio-system --wait
+torch-model-archiver \
+    --model-name sd3 \
+    --version 1.0 \
+    --handler sd3_handler.py \
+    --requirements-file requirements.txt \
+    -f \
+    --export-path ./model-store
 
-helm install istiod istio/istiod \
-  --version 1.20.2 \
-  --namespace istio-system --wait
+echo "MAR file created at ../model-store/sd3.mar" 
+```
+Here we specify handler, directory of model weights and requirements.txt. The output will be mar file stored in `model-store` directory
 
-kubectl create namespace istio-ingress
+**Step - 4**
+Once the mar file is ready we can proceed to upload to AWS S3 bucket - [upload_to_s3.sh](sd3-kserve/bash_scripts/upload_to_s3.sh)
+config file used - [config.properties](sd3-kserve/config/config.properties)
 
-helm install istio-ingress istio/gateway \
-  --version 1.20.2 \
-  --namespace istio-ingress \
-  --set labels.istio=ingressgateway \
-  --set service.annotations."service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"=external \
-  --set service.annotations."service\\.beta\\.kubernetes\\.io/aws-load-balancer-nlb-target-type"=ip \
-  --set service.annotations."service\\.beta\\.kubernetes\\.io/aws-load-balancer-scheme"=internet-facing \
-  --set service.annotations."service\\.beta\\.kubernetes\\.io/aws-load-balancer-attributes"="load_balancing.cross_zone.enabled=true" 
+Now the steps to build torchscript model are completed. We move to deployment and inference
 
-helm ls -n istio-system
-helm ls -n istio-ingress
+---
 
-kubectl rollout restart deployment istio-ingress -n istio-ingress
+## Deployment and Inference of Torchscript model
 
-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+**Step - 1**
+We will create a yaml file to deploy our model - [sd3-isvc.yaml](sd3-kserve/deployment/sd3-isvc.yaml)
 
-for ADDON in kiali jaeger prometheus grafana
-do
-    ADDON_URL="https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/$ADDON.yaml"
-    kubectl apply -f $ADDON_URL
-done
+```yaml
+apiVersion: "serving.kserve.io/v1beta1"
+kind: "InferenceService"
+metadata:
+  name: "torchserve-sd3"
+spec:
+  predictor:
+    serviceAccountName: s3-read-only
+    pytorch:
+      protocolVersion: v1
+      storageUri: "s3://sd3-kserve/sd3/"
+      image: pytorch/torchserve-kfs:0.12.0-gpu
+      resources:
+        limits:
+          cpu: "8"
+          memory: 16Gi
+          nvidia.com/gpu: "1"
+      env:
+        - name: TS_DISABLE_TOKEN_AUTHORIZATION
+          value: "true"
+```
+Run command `kubectl apply -f sd3-isvc.yaml` to create deployment
 
-kubectl label namespace default istio-injection=enabled
+**Step - 2**
+We can track our deployment using below command - 
 
-kubectl get crd gateways.gateway.networking.k8s.io &> /dev/null || \
-  { kubectl kustomize "github.com/kubernetes-sigs/gateway-api/config/crd?ref=v1.2.0" | kubectl apply -f -; }
+```bash
+# Check pods status
+kubectl get pods
+kubectl describe pod <pod-name>
+```
+```bash
+# Check deployment status
+kubectl get deployment
+kubectl describe deployment <deployment-name>
+```
+```bash
+# Check pod logs
+kubectl logs -f <pod-name>
+```
+Above commands will help us understand if our model is ready for inference or not
 
-eksctl create iamserviceaccount \
---cluster=eks-cluster-kserve \
---namespace=kube-system \
---name=aws-load-balancer-controller \
---attach-policy-arn=arn:aws:iam::390430468701:policy/AWSLoadBalancerControllerIAMPolicy \
---override-existing-serviceaccounts \
---region ap-south-1 \
---approve
+**Step - 3**
+In order to perform inference we will need to fetch below details -
 
-helm repo add eks https://aws.github.io/eks-charts
+```bash
+# fetch host
+kubectl get isvc
 
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --set clusterName=eks-cluster-kserve --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller
+# output - torchserve-sd3-default.example.com
+```
 
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/platform/kube/bookinfo.yaml
+```bash
+# fetch endpoint
+kubectl get isvc -n istio-system
 
-kubectl exec "$(kubectl get pod -l app=ratings -o jsonpath='{.items[0].metadata.name}')" -c ratings -- curl -sS productpage:9080/productpage | grep -o "<title>.*</title>"
+# output - k8s-istioing-istioing-163c0111d9-c1e5608c48727220.elb.ap-south-1.amazonaws.com
+```
 
-kubectl apply -f istio-kserve-ingress.yaml
+**Step - 4**
+Now using details from step 3 we perform inference - [test_inference.py](sd3-kserve/test_inference.py)
+```python
+python test_inference.py
+```
 
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+---
 
-# install kserve crd
-helm install kserve-crd oci://ghcr.io/kserve/charts/kserve-crd --version v0.14.1
+## Output
 
-helm install kserve oci://ghcr.io/kserve/charts/kserve \
-  --version v0.14.1 \
-  --set kserve.controller.deploymentMode=RawDeployment \
-  --set kserve.controller.gateway.ingressGateway.className=istio
+**logs of kubernetes resources** - [all_deployments.yaml](sd3-kserve/all_deployments.yaml)
 
-# test kserve
-kubectl apply -f test_kserve/iris.yaml
+**Pods log**
+<img width="1440" alt="Screenshot 2025-01-25 at 3 56 30 PM" src="https://github.com/user-attachments/assets/4d65540e-0a3c-4010-b510-9043eb8603f4" />
 
-kubectl get inferenceservice
+**Test Inference**
+<img width="1258" alt="Screenshot 2025-01-25 at 4 35 23 PM" src="https://github.com/user-attachments/assets/4d25a6c3-d77f-40aa-92cf-0e9425d563ff" />
 
-# s3 access for kserve
-eksctl create iamserviceaccount \
-	--cluster=eks-cluster-kserve \
-	--name=s3-read-only \
-	--attach-policy-arn=arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess \
-	--override-existing-serviceaccounts \
-	--region ap-south-1 \
-	--approve
+**Runtime inference logs**
+<img width="1440" alt="Screenshot 2025-01-25 at 4 40 12 PM" src="https://github.com/user-attachments/assets/24824c2f-a373-43b0-a2ab-6c152cd30380" />
 
-kubectl apply -f s3-secret.yaml
+---
 
-kubectl patch serviceaccount s3-read-only -p '{"secrets": [{"name": "s3-secret"}]}'
+## Monitoring
+
+### Kiali graph
+
+**Graph Notation**
+<img width="1078" alt="Screenshot 2025-01-25 at 4 37 33 PM" src="https://github.com/user-attachments/assets/27a75ee1-3bcc-4802-8560-63c2db7cb6d2" />
+
+**Inference logs on Kiali**
+<img width="1074" alt="Screenshot 2025-01-25 at 4 37 57 PM" src="https://github.com/user-attachments/assets/f775fd63-64bc-4b0e-9b7a-c982e3e5f314" />
+
+---
+
+### Grafana
+
+<img width="727" alt="image" src="https://github.com/user-attachments/assets/8429b9f8-cf2d-40b1-b256-2d306979d509" />
+
+---
+
+## SD3 Output
+
+Inference 1
+<img width="300" alt="image" src="sd3-kserve/output_images/output_1.jpg" />
+
+Inference 2
+<img width="300" alt="image" src="sd3-kserve/output_images/output_2.jpg" />
+
+Inference 3
+<img width="300" alt="image" src="sd3-kserve/output_images/output_3.jpg" />
+
+Inference 4
+<img width="300" alt="image" src="sd3-kserve/output_images/output_4.jpg" />
+
+Inference 5
+<img width="300" alt="image" src="sd3-kserve/output_images/output_5.jpg" />
+
+---
+
+
